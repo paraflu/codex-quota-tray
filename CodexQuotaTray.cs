@@ -16,29 +16,10 @@ internal static class NativeMethods
     public static extern bool DestroyIcon(IntPtr handle);
 }
 
-internal static class DrawingExtensions
-{
-    private static System.Drawing.Drawing2D.GraphicsPath RoundedPath(RectangleF bounds, float radius)
-    {
-        var path = new System.Drawing.Drawing2D.GraphicsPath(); var diameter = radius * 2;
-        path.AddArc(bounds.X, bounds.Y, diameter, diameter, 180, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Y, diameter, diameter, 270, 90);
-        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
-        path.AddArc(bounds.X, bounds.Bottom - diameter, diameter, diameter, 90, 90); path.CloseFigure(); return path;
-    }
-    public static void FillRoundedRectangle(this Graphics graphics, Brush brush, RectangleF bounds, float radius)
-    {
-        using (var path = RoundedPath(bounds, radius)) graphics.FillPath(brush, path);
-    }
-    public static void DrawRoundedRectangle(this Graphics graphics, Pen pen, RectangleF bounds, float radius)
-    {
-        using (var path = RoundedPath(bounds, radius)) graphics.DrawPath(pen, path);
-    }
-}
 
 internal sealed class QuotaWindow
 {
-    public string Label; public double Used; public double Remaining; public long? ResetsAt;
+    public string Key, Label; public int Minutes; public double Used; public double Remaining; public long? ResetsAt;
 }
 
 internal sealed class Snapshot
@@ -53,24 +34,43 @@ internal sealed class TrayApp : ApplicationContext
     private readonly NotifyIcon tray = new NotifyIcon();
     private readonly Timer timer = new Timer { Interval = 15000 };
     private readonly Timer postResetTimer = new Timer { Interval = 5000 };
+    private readonly Font menuFont = new Font("Segoe UI", 9);
+    private readonly Font titleFont = new Font("Segoe UI Semibold", 10);
     private Icon currentIcon;
     private long? displayedResetAt;
     private bool postResetRefreshQueued;
 
     public TrayApp()
     {
-        timer.Tick += delegate { Refresh(); };
-        postResetTimer.Tick += delegate { postResetTimer.Stop(); Refresh(); };
+        timer.Tick += delegate { if (tray.ContextMenuStrip == null || !tray.ContextMenuStrip.Visible) Refresh(); };
+        postResetTimer.Tick += delegate { postResetTimer.Stop(); if (tray.ContextMenuStrip == null || !tray.ContextMenuStrip.Visible) Refresh(); };
         // Windows registers a NotifyIcon more reliably when it has an icon before
         // it is made visible.  Register a known-good fallback first; Refresh()
         // immediately replaces it with the quota indicator.
         tray.Icon = SystemIcons.Application;
         tray.Text = "Codex Quota Tray";
         tray.Visible = true;
+        tray.MouseClick += delegate(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left) tray.ContextMenuStrip.Show(Cursor.Position);
+        };
         Refresh();
         timer.Start();
     }
 
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            timer.Dispose(); postResetTimer.Dispose();
+            var menu = tray.ContextMenuStrip;
+            tray.Dispose();
+            if (menu != null) menu.Dispose();
+            if (currentIcon != null) currentIcon.Dispose();
+            titleFont.Dispose(); menuFont.Dispose();
+        }
+        base.Dispose(disposing);
+    }
     private static string Label(int minutes)
     {
         if (minutes == 300) return "5-hour usage";
@@ -92,15 +92,6 @@ internal sealed class TrayApp : ApplicationContext
         return Math.Max(1, minutes) + "m";
     }
 
-    private static string ShortRelative(long? unix)
-    {
-        if (!unix.HasValue) return "--";
-        var seconds = (long)(DateTimeOffset.FromUnixTimeSeconds(unix.Value).LocalDateTime - DateTime.Now).TotalSeconds;
-        if (seconds <= 0) return "now";
-        var days = seconds / 86400;
-        if (days > 0) return days + "d";
-        return Math.Max(1, seconds / 3600) + "h";
-    }
 
     private static object Get(Dictionary<string, object> value, string key)
     {
@@ -151,9 +142,9 @@ internal sealed class TrayApp : ApplicationContext
                         var used = Number(Get(data, "used_percent")); var minutes = Number(Get(data, "window_minutes"));
                         if (!used.HasValue || !minutes.HasValue || minutes.Value <= 0) continue;
                         var reset = Number(Get(data, "resets_at"));
-                        snapshot.Windows.Add(new QuotaWindow { Label = Label((int)minutes.Value), Used = used.Value, Remaining = Math.Max(0, Math.Min(100, 100 - used.Value)), ResetsAt = reset.HasValue ? (long?)reset.Value : null });
+                        snapshot.Windows.Add(new QuotaWindow { Key = pair.Key, Minutes = (int)minutes.Value, Label = Label((int)minutes.Value), Used = used.Value, Remaining = Math.Max(0, Math.Min(100, 100 - used.Value)), ResetsAt = reset.HasValue ? (long?)reset.Value : null });
                     }
-                    snapshot.Windows = snapshot.Windows.OrderBy(x => x.Label.Contains("5-hour") ? 0 : x.Label.Contains("day") ? 1 : 2).ToList();
+                    snapshot.Windows = snapshot.Windows.OrderBy(x => x.Minutes).ThenBy(x => x.Key).ToList();
                     if (snapshot.Windows.Count > 0 || !String.IsNullOrEmpty(snapshot.Reached))
                     {
                         if (best == null || snapshot.Observed > best.Observed) best = snapshot;
@@ -166,75 +157,109 @@ internal sealed class TrayApp : ApplicationContext
         return best ?? new Snapshot { Error = "No rate limit event found in recent Codex logs." };
     }
 
-    private static Icon DrawIcon(Snapshot snapshot)
+    internal static Color QuotaColor(double remaining)
     {
-        var bitmap = new Bitmap(32, 32); using (var g = Graphics.FromImage(bitmap))
+        return ColorTranslator.FromHtml(remaining >= 40 ? "#30A46C" : remaining >= 20 ? "#B7791F" : "#D64550");
+    }
+
+    internal static Icon DrawIcon(Snapshot snapshot)
+    {
+        using (var bitmap = new Bitmap(32, 32))
         {
-            g.Clear(Color.Transparent); g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            var shown = snapshot.Windows.Take(2).ToList();
-            using (var outerBack = new Pen(Color.FromArgb(75, 90, 100), 5))
-            using (var innerBack = new Pen(Color.FromArgb(75, 90, 100), 5))
+            using (var g = Graphics.FromImage(bitmap))
             {
-                g.DrawArc(outerBack, 2, 2, 28, 28, -90, 359);
-                if (shown.Count > 1) g.DrawArc(innerBack, 7, 7, 18, 18, -90, 359);
+                g.Clear(Color.Transparent); g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var pen = new Pen(Color.Gray, 2))
+                {
+                    g.DrawLines(pen, new[] { new Point(2, 11), new Point(6, 15), new Point(2, 19) });
+                    g.DrawLine(pen, 6, 21, 10, 21);
+                }
+                var shown = snapshot.Windows.Take(2).ToList();
+                if (shown.Count == 0)
+                {
+                    g.FillEllipse(Brushes.Gray, 17, 14, 3, 3);
+                    g.FillEllipse(Brushes.Gray, 25, 14, 3, 3);
+                }
                 for (var i = 0; i < shown.Count; i++)
                 {
-                    var p = shown[i].Remaining;
-                    var color = p >= 40 ? Color.FromArgb(38, 189, 104) : p >= 20 ? Color.FromArgb(245, 180, 35) : Color.FromArgb(239, 68, 68);
-                    using (var pen = new Pen(color, 5))
+                    var y = shown.Count == 1 ? 16 : 10 + 12 * i;
+                    var remaining = Math.Max(0, Math.Min(100, shown[i].Remaining));
+                    using (var pen = new Pen(Color.FromArgb(100, 128, 128, 128), 6))
                     {
-                        if (i == 0) g.DrawArc(pen, 2, 2, 28, 28, -90, (float)(p * 3.59));
-                        else g.DrawArc(pen, 7, 7, 18, 18, -90, (float)(p * 3.59));
+                        pen.StartCap = pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                        g.DrawLine(pen, 16, y, 28, y);
+                        if (remaining > 0)
+                        {
+                            pen.Color = QuotaColor(remaining);
+                            g.DrawLine(pen, 16, y, (float)(16 + 12 * remaining / 100), y);
+                        }
                     }
                 }
             }
-            var resetText = ShortRelative(shown.Count > 1 ? shown[1].ResetsAt : shown.Count == 1 ? shown[0].ResetsAt : null);
-            using (var font = new Font("Segoe UI", 13.5f, FontStyle.Bold, GraphicsUnit.Pixel))
-            using (var brush = new SolidBrush(Color.FromArgb(135, 140, 145)))
+            var handle = bitmap.GetHicon();
+            try { using (var borrowed = Icon.FromHandle(handle)) return (Icon)borrowed.Clone(); }
+            finally { NativeMethods.DestroyIcon(handle); }
+        }
+    }
+
+    internal static ToolStripControlHost NewQuotaCard(QuotaWindow window, Font titleFont)
+    {
+        var panel = new Panel { Size = new Size(296, 88), BackColor = ColorTranslator.FromHtml("#F7F8FA") };
+        panel.Controls.Add(new Label { Text = window.Label, Bounds = new Rectangle(12, 10, 164, 22),
+            Font = titleFont, ForeColor = ColorTranslator.FromHtml("#20242C") });
+        panel.Controls.Add(new Label { Text = Math.Round(window.Remaining) + "% left", Bounds = new Rectangle(178, 10, 106, 22),
+            TextAlign = ContentAlignment.TopRight, Font = titleFont, ForeColor = QuotaColor(window.Remaining) });
+        panel.Controls.Add(new Label { Text = Math.Round(window.Used) + "% used  /  Resets in " + Relative(window.ResetsAt),
+            Bounds = new Rectangle(12, 59, 272, 22), ForeColor = ColorTranslator.FromHtml("#626B78") });
+        panel.Paint += delegate(object sender, PaintEventArgs e)
+        {
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var pen = new Pen(ColorTranslator.FromHtml("#E2E5EA"), 8))
             {
-                var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                g.DrawString(resetText, font, brush, new RectangleF(3, 5, 26, 22), format);
+                pen.StartCap = pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                e.Graphics.DrawLine(pen, 16, 43, 280, 43);
+                var remaining = Math.Max(0, Math.Min(100, window.Remaining));
+                if (remaining > 0)
+                {
+                    pen.Color = QuotaColor(remaining);
+                    e.Graphics.DrawLine(pen, 16, 43, (float)(16 + 264 * remaining / 100), 43);
+                }
             }
-        }
-        var handle = bitmap.GetHicon();
-        try
-        {
-            // Clone the icon before releasing the native handle.  NotifyIcon needs
-            // an owned icon handle; a borrowed Bitmap handle is ignored by some
-            // Windows 11 notification-area hosts.
-            using (var borrowed = Icon.FromHandle(handle)) return (Icon)borrowed.Clone();
-        }
-        finally
-        {
-            NativeMethods.DestroyIcon(handle);
-            bitmap.Dispose();
-        }
+        };
+        return new ToolStripControlHost(panel) { Margin = new Padding(8, 4, 8, 4) };
     }
 
     private void Refresh()
     {
-        var snapshot = Load(); var menu = new ContextMenuStrip();
+        var snapshot = Load();
+        var menu = new ContextMenuStrip { Font = menuFont, BackColor = Color.White,
+            ForeColor = ColorTranslator.FromHtml("#20242C"), RenderMode = ToolStripRenderMode.System,
+            ShowImageMargin = false, ShowCheckMargin = true, Padding = new Padding(4, 6, 4, 6), ShowItemToolTips = true };
         QueuePostResetRefresh(snapshot);
-        AddDisabled(menu, "Codex Quota Tray");
+        menu.Items.Add(new ToolStripLabel("Codex Quota") { Font = titleFont, Margin = new Padding(12, 6, 12, 4) });
         if (!String.IsNullOrEmpty(snapshot.Error)) { AddDisabled(menu, snapshot.Error); tray.Text = "Codex quota: unavailable"; }
         else
         {
             if (!String.IsNullOrEmpty(snapshot.Plan)) AddDisabled(menu, "Plan: " + snapshot.Plan);
-            if (!String.IsNullOrEmpty(snapshot.Reached)) AddDisabled(menu, "Limit reached: " + snapshot.Reached);
-            menu.Items.Add(new ToolStripSeparator()); var tooltip = new List<string>();
+            if (!String.IsNullOrEmpty(snapshot.Reached)) menu.Items.Add(new ToolStripLabel("Limit reached: " + snapshot.Reached) { ForeColor = QuotaColor(0) });
+            var tooltip = new List<string>();
             foreach (var window in snapshot.Windows)
             {
-                AddDisabled(menu, String.Format("{0}: {1:0}% used / {2:0}% left; resets in {3}", window.Label, window.Used, window.Remaining, Relative(window.ResetsAt)));
+                menu.Items.Add(NewQuotaCard(window, titleFont));
                 tooltip.Add(window.Label + " " + Math.Round(window.Remaining) + "% left");
             }
-            menu.Items.Add(new ToolStripSeparator()); AddDisabled(menu, "Updated: " + snapshot.Observed.ToString("g")); AddDisabled(menu, "Source: " + Path.GetFileName(snapshot.Source));
+            AddDisabled(menu, "Updated " + snapshot.Observed.ToString("g"));
+            menu.Items[menu.Items.Count - 1].ToolTipText = "Source: " + snapshot.Source;
             tray.Text = String.Join(" / ", tooltip).Substring(0, Math.Min(63, String.Join(" / ", tooltip).Length));
         }
         menu.Items.Add(new ToolStripSeparator()); menu.Items.Add("Refresh now", null, delegate { Refresh(); });
         menu.Items.Add("Open session logs", null, delegate { System.Diagnostics.Process.Start(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "sessions")); });
         var login = (ToolStripMenuItem)menu.Items.Add("Start at login", null, delegate { SetStartup(!IsStartup()); Refresh(); }); login.Checked = IsStartup();
         menu.Items.Add(new ToolStripSeparator()); menu.Items.Add("Quit", null, delegate { tray.Visible = false; ExitThread(); });
-        tray.ContextMenuStrip = menu; var next = DrawIcon(snapshot); tray.Icon = next; if (currentIcon != null) currentIcon.Dispose(); currentIcon = next;
+        var previousMenu = tray.ContextMenuStrip;
+        tray.ContextMenuStrip = menu;
+        if (previousMenu != null) previousMenu.Dispose();
+        var next = DrawIcon(snapshot); tray.Icon = next; if (currentIcon != null) currentIcon.Dispose(); currentIcon = next;
     }
 
     // A reset is reflected only when Codex writes a new local rate-limit record.
@@ -272,6 +297,6 @@ internal static class Program
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new TrayApp());
+        using (var app = new TrayApp()) Application.Run(app);
     }
 }

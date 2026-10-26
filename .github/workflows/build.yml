@@ -1,0 +1,24 @@
+name: Build Windows tray app
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test C# and PowerShell UI
+        shell: powershell
+        run: .\Build.ps1 -Test
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexQuotaTray-Windows
+          path: bin/CodexQuotaTray.exe
+          if-no-files-found: error

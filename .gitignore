@@ -1,6 +1,7 @@
 # Local build and editor artifacts
 bin/
 obj/
+*.exe
 *.pdb
 *.user
 .vs/
