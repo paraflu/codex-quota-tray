@@ -12,6 +12,20 @@ For the macOS version, see [PlutaB/codex-quota-menubar](https://github.com/Pluta
 
 Double-click `CodexQuotaTray.exe`. A compact indicator appears in the lower-right notification area (it may initially be in the `^` overflow menu). Hover or right-click it for quota details, refresh, session-log folder access, startup toggle, and quit.
 
+### PowerShell UI
+
+Run `Run-CodexQuotaTray.cmd` (or the command below without `-Once`) to use the redesigned PowerShell version: rounded quota bars, readable percentage/reset cards, and a compact color-coded tray icon. Left-click or right-click the icon to open the menu. The prebuilt `.exe` is unchanged.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\CodexQuotaTray.ps1
+```
+
+UI smoke check (Windows, no real session logs required):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Test-QuotaTray.ps1
+```
+
 The indicator shows the first two quota windows in ascending duration (normally 5-hour and 7-day). Green means at least 40% remaining, amber means 20–39%, and red means below 20%.
 
 
